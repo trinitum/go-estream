@@ -38,7 +38,8 @@ type averager interface {
 
 type testAggregator struct {
 	name     string
-	config   AggregatorConfig
+	aggr     Aggregator
+	opts     []AggregatorOption
 	expected []testOut
 }
 
@@ -48,8 +49,7 @@ func testStream(t *testing.T, stream []Event, tal ...testAggregator) {
 	for _, ta := range tal {
 		name := ta.name
 		exp[name] = ta.expected
-		cfg := ta.config
-		aggr := cfg.Aggregator.(averager)
+		aggr := ta.aggr.(averager)
 		report := func(gcb, gtime int64) {
 			gvalue := aggr.Mean()
 			if len(exp[name]) == 0 {
@@ -64,13 +64,14 @@ func testStream(t *testing.T, stream []Event, tal ...testAggregator) {
 			}
 			// t.Logf("%s: got %s, %d, %f as expected", name, eventName(gcb), gtime, gvalue)
 		}
-		cfg.OnEnter = func(ts int64) { report(onEnter, ts) }
-		if cfg.Batch {
-			cfg.OnReset = func(ts int64) { report(onReset, ts) }
-		} else {
-			cfg.OnLeave = func(ts int64) { report(onLeave, ts) }
+		var opts []AggregatorOption
+		for _, o := range ta.opts {
+			opts = append(opts, o)
 		}
-		if err := p.AddAggregator(cfg); err != nil {
+		opts = append(opts, WithOnEnter(func(ts int64) { report(onEnter, ts) }))
+		opts = append(opts, WithOnReset(func(ts int64) { report(onReset, ts) }))
+		opts = append(opts, WithOnLeave(func(ts int64) { report(onLeave, ts) }))
+		if err := p.AddAggregator(ta.aggr, opts...); err != nil {
 			t.Errorf("Couldn't add aggregator %s: %v", name, err)
 		}
 	}
@@ -104,10 +105,6 @@ func TestTimeStream(t *testing.T) {
 		{19, 5},
 		{22, 7},
 	}
-	timeTest1Cfg := AggregatorConfig{
-		Aggregator: NewTimeAvgAggregator(func(i interface{}) int64 { return i.(int64) }),
-		Duration:   3,
-	}
 	timeTest1 := []testOut{
 		{onEnter, 0, 1},
 		{onEnter, 1, 1},
@@ -125,13 +122,9 @@ func TestTimeStream(t *testing.T) {
 	}
 	timeTest1Agg := testAggregator{
 		name:     "Test 1",
-		config:   timeTest1Cfg,
+		aggr:     NewTimeAvgAggregator(func(i interface{}) int64 { return i.(int64) }),
+		opts:     []AggregatorOption{WithDuration(3)},
 		expected: timeTest1,
-	}
-	timeTest2Cfg := AggregatorConfig{
-		Aggregator: NewTimeAvgAggregator(func(i interface{}) int64 { return i.(int64) }),
-		Duration:   3,
-		Batch:      true,
 	}
 	timeTest2 := []testOut{
 		{onEnter, 0, 1},
@@ -150,24 +143,26 @@ func TestTimeStream(t *testing.T) {
 		{onEnter, 22, 5},
 	}
 	timeTest2Agg := testAggregator{
-		name:     "Test 2",
-		config:   timeTest2Cfg,
+		name: "Test 2",
+		aggr: NewTimeAvgAggregator(func(i interface{}) int64 { return i.(int64) }),
+		opts: []AggregatorOption{
+			WithDuration(3),
+			WithBatch(),
+		},
 		expected: timeTest2,
-	}
-	timeTest3Cfg := AggregatorConfig{
-		Aggregator: NewTimeAvgAggregator(func(i interface{}) int64 { return i.(int64) }),
-		Duration:   7,
-		StartTime:  3,
-		Batch:      true,
-		Disposable: true,
 	}
 	timeTest3 := []testOut{
 		{onEnter, 5, 1},
 		{onReset, 10, 1},
 	}
 	timeTest3Agg := testAggregator{
-		name:     "Test 3",
-		config:   timeTest3Cfg,
+		name: "Test 3",
+		aggr: NewTimeAvgAggregator(func(i interface{}) int64 { return i.(int64) }),
+		opts: []AggregatorOption{
+			WithDuration(7),
+			WithStartTime(3),
+			WithDisposable(),
+		},
 		expected: timeTest3,
 	}
 	testStream(t, stream, timeTest1Agg, timeTest2Agg, timeTest3Agg)
@@ -185,10 +180,6 @@ func TestCountStream(t *testing.T) {
 		{4, 1},
 		{5, 1},
 	}
-	countTest1Cfg := AggregatorConfig{
-		Aggregator: NewCountAvgAggregator(func(i interface{}) int64 { return i.(int64) }),
-		Count:      5,
-	}
 	countTest1 := []testOut{
 		{onEnter, 0, 1},
 		{onEnter, 1, 1.5},
@@ -205,14 +196,12 @@ func TestCountStream(t *testing.T) {
 		{onEnter, 5, 4},
 	}
 	countTest1Agg := testAggregator{
-		name:     "Test 1",
-		config:   countTest1Cfg,
+		name: "Test 1",
+		aggr: NewCountAvgAggregator(func(i interface{}) int64 { return i.(int64) }),
+		opts: []AggregatorOption{
+			WithCount(5),
+		},
 		expected: countTest1,
-	}
-	countTest2Cfg := AggregatorConfig{
-		Aggregator: NewCountAvgAggregator(func(i interface{}) int64 { return i.(int64) }),
-		Count:      3,
-		Batch:      true,
 	}
 	countTest2 := []testOut{
 		{onEnter, 0, 1},
@@ -229,15 +218,13 @@ func TestCountStream(t *testing.T) {
 		{onReset, 5, 3},
 	}
 	countTest2Agg := testAggregator{
-		name:     "Test 2",
-		config:   countTest2Cfg,
+		name: "Test 2",
+		aggr: NewCountAvgAggregator(func(i interface{}) int64 { return i.(int64) }),
+		opts: []AggregatorOption{
+			WithCount(3),
+			WithBatch(),
+		},
 		expected: countTest2,
-	}
-	countTest3Cfg := AggregatorConfig{
-		Aggregator: NewTimeAvgAggregator(func(i interface{}) int64 {
-			return i.(int64)
-		}),
-		Count: 3,
 	}
 	countTest3 := []testOut{
 		{onEnter, 0, 1},
@@ -260,8 +247,11 @@ func TestCountStream(t *testing.T) {
 		{onEnter, 5, 4},
 	}
 	countTest3Agg := testAggregator{
-		name:     "Test 3",
-		config:   countTest3Cfg,
+		name: "Test 3",
+		aggr: NewTimeAvgAggregator(func(i interface{}) int64 {
+			return i.(int64)
+		}),
+		opts:     []AggregatorOption{WithCount(3)},
 		expected: countTest3,
 	}
 	testStream(t, stream, countTest1Agg, countTest2Agg, countTest3Agg)
@@ -279,11 +269,6 @@ func TestMixedStream(t *testing.T) {
 		{26, 2},
 		{27, 3},
 		{28, 4},
-	}
-	mxTest1Cfg := AggregatorConfig{
-		Aggregator: NewTimeAvgAggregator(func(i interface{}) int64 { return i.(int64) }),
-		Duration:   5,
-		Count:      3,
 	}
 	mxTest1 := []testOut{
 		{onEnter, 5, 1},
@@ -305,16 +290,13 @@ func TestMixedStream(t *testing.T) {
 		{onEnter, 28, 2.5},
 	}
 	mxTest1Agg := testAggregator{
-		name:     "Test 1",
-		config:   mxTest1Cfg,
+		name: "Test 1",
+		aggr: NewTimeAvgAggregator(func(i interface{}) int64 { return i.(int64) }),
+		opts: []AggregatorOption{
+			WithDuration(5),
+			WithCount(3),
+		},
 		expected: mxTest1,
-	}
-	mxTest2Cfg := AggregatorConfig{
-		Aggregator: NewTimeAvgAggregator(func(i interface{}) int64 { return i.(int64) }),
-		StartTime:  10,
-		Duration:   6,
-		Count:      3,
-		Batch:      true,
 	}
 	mxTest2 := []testOut{
 		{onEnter, 11, 5},
@@ -328,8 +310,14 @@ func TestMixedStream(t *testing.T) {
 		{onEnter, 28, 4},
 	}
 	mxTest2Agg := testAggregator{
-		name:     "Test 2",
-		config:   mxTest2Cfg,
+		name: "Test 2",
+		aggr: NewTimeAvgAggregator(func(i interface{}) int64 { return i.(int64) }),
+		opts: []AggregatorOption{
+			WithStartTime(10),
+			WithDuration(6),
+			WithCount(3),
+			WithBatch(),
+		},
 		expected: mxTest2,
 	}
 	testStream(t, stream, mxTest1Agg, mxTest2Agg)

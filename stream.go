@@ -5,37 +5,93 @@ import (
 	"math"
 )
 
-// AggregatorConfig struct describes how aggregator should be used by the
-// Stream. It includes aggregator itself, parameters of aggregator's
-// window, and callback functions that should be called when events enter or
-// leave aggregator's window
-type AggregatorConfig struct {
-	// Aggregator is an instance of Aggregator interface
-	Aggregator Aggregator
-	// Count is the size of the aggregator's window in the number of
-	// events. Should be zero if aggregator uses only time window.
-	Count int64
-	// Duration is the length of the aggregator's window in time. Should
-	// be zero if window is only limited by the number of events.
-	Duration int64
-	// Batch. If set every time the window reaches its full size,
-	// aggregator is reset and window size is reduced to zero.
-	Batch bool
-	// Disposable can be used with batch aggregators. Once window reached
-	// its full size aggregator is reset and deleted.
-	Disposable bool
-	// StartTime should be set if aggregator should be activated at some
-	// point in time
-	StartTime int64
-	// OnEnter is a function that is called every time after the
-	// aggregator's Enter method. Argument is a current model time.
-	OnEnter func(int64)
-	// OnLeave is a function that is called every time before the
-	// aggregator's Leave method. Argument is a current model time.
-	OnLeave func(int64)
-	// OnReset is a function that is called every time before the
-	// aggregator's Reset method. Argument is a current model time.
-	OnReset func(int64)
+// AggregatorOption configures aggregator
+type AggregatorOption func(*aggregator) error
+
+// WithCount specifies the window size in the number of events
+func WithCount(count int64) AggregatorOption {
+	return func(agg *aggregator) error {
+		if count < 0 {
+			return fmt.Errorf("WithCount argument must not be negative")
+		}
+		agg.count = count
+		return nil
+	}
+}
+
+// WithDuration specifies the time span of the window
+func WithDuration(duration int64) AggregatorOption {
+	return func(agg *aggregator) error {
+		if duration < 0 {
+			return fmt.Errorf("WithDuration argument must not be negative")
+		}
+		agg.duration = duration
+		return nil
+	}
+}
+
+// WithBatch specifies that when window reaches it's maximum size all events
+// are removed from it at once and window is reset to a zero size
+func WithBatch() AggregatorOption {
+	return func(agg *aggregator) error {
+		agg.batch = true
+		return nil
+	}
+}
+
+// WithDisposable specifies that when window reaches it's maximum size, all
+// events are removed from it at once, and aggregator itself is dropped
+func WithDisposable() AggregatorOption {
+	return func(agg *aggregator) error {
+		agg.disposable = true
+		agg.batch = true
+		return nil
+	}
+}
+
+// WithStartTime specifies the time from which aggregator should start
+// aggregating events, events arriving before the specified time are not
+// passed to the aggregator. The time specified must not be from the past.
+func WithStartTime(t int64) AggregatorOption {
+	return func(agg *aggregator) error {
+		if agg.win.StartTime > t {
+			return fmt.Errorf("The specified start time %d is less than current model time %d", t, agg.win.StartTime)
+		}
+		agg.startTime = t
+		agg.win.StartTime = t
+		agg.win.EndTime = t
+		return nil
+	}
+}
+
+// WithOnEnter specifies the function that should be invoked every time
+// immidiately after the aggregator's Enter method. The only argument is the
+// current model time.
+func WithOnEnter(f func(int64)) AggregatorOption {
+	return func(agg *aggregator) error {
+		agg.onEnter = f
+		return nil
+	}
+}
+
+// WithOnLeave specifies the function that should be invoked every time just
+// before the aggregator's Leave method. The only argument is the current
+// model time.
+func WithOnLeave(f func(int64)) AggregatorOption {
+	return func(agg *aggregator) error {
+		agg.onLeave = f
+		return nil
+	}
+}
+
+// WithOnReset specifies the function that should be invoked every time just
+// before the aggregator's Reset method. The only argument is the current
+// model time.
+func WithOnReset(f func(int64)) AggregatorOption {
+	return func(agg *aggregator) error {
+		agg.onReset = f
+		return nil
+	}
 }
 
 type aggregator struct {
@@ -240,41 +296,21 @@ func (s *Stream) setAggregatorTime(aggr *aggregator) bool {
 	return false
 }
 
-func (s *Stream) addAggregator(aggrConf AggregatorConfig) error {
-	if aggrConf.Count == 0 && aggrConf.Duration == 0 {
-		return fmt.Errorf("At least one of Count and Duration must be set")
-	}
-	if aggrConf.Count < 0 || aggrConf.Duration < 0 {
-		return fmt.Errorf("Count and Duration must not be negative")
-	}
-	if aggrConf.Disposable && !aggrConf.Batch {
-		return fmt.Errorf("Only Batch aggregators can be Disposable")
-	}
-	if aggrConf.OnReset != nil && !aggrConf.Batch {
-		return fmt.Errorf("OnReset is only makes sense for batch aggregators")
-	}
-	if aggrConf.OnLeave != nil && aggrConf.Batch {
-		return fmt.Errorf("OnLeave is never called for batch aggregators")
-	}
-	if aggrConf.StartTime < s.time && aggrConf.StartTime != 0 {
-		return fmt.Errorf("StartTime must be more or equal to current model time or zero")
-	}
+func (s *Stream) addAggregator(aggrObj Aggregator, aggrOptions ...AggregatorOption) error {
 	winTime := s.time
-	if aggrConf.StartTime > s.time {
-		winTime = aggrConf.StartTime
-	}
 	aggr := &aggregator{
-		win:        Window{StartTime: winTime, EndTime: winTime},
-		obj:        aggrConf.Aggregator,
-		count:      aggrConf.Count,
-		duration:   aggrConf.Duration,
-		batch:      aggrConf.Batch,
-		disposable: aggrConf.Disposable,
-		startTime:  aggrConf.StartTime,
-		onEnter:    aggrConf.OnEnter,
-		onLeave:    aggrConf.OnLeave,
-		onReset:    aggrConf.OnReset,
+		win: Window{StartTime: winTime, EndTime: winTime},
+		obj: aggrObj,
 	}
+	for _, opt := range aggrOptions {
+		if err := opt(aggr); err != nil {
+			return err
+		}
+	}
+	if aggr.count == 0 && aggr.duration == 0 {
+		return fmt.Errorf("At least one of Count or Duration must be set")
+	}
+
 	if len(s.deleted) > 0 {
 		s.aggregators[s.deleted[0]] = aggr
 		s.deleted = s.deleted[1:]
@@ -303,14 +339,15 @@ func (s *Stream) SetTime(t int64) error {
 }
 
 type msgAddAggregator struct {
-	aggr AggregatorConfig
+	aggr Aggregator
+	opts []AggregatorOption
 	res  chan<- error
 }
 
 // AddAggregator adds new aggregator object to the stream
-func (s *Stream) AddAggregator(aggr AggregatorConfig) error {
+func (s *Stream) AddAggregator(aggr Aggregator, opts ...AggregatorOption) error {
 	res := make(chan error)
-	s.in <- &msgAddAggregator{aggr: aggr, res: res}
+	s.in <- &msgAddAggregator{aggr: aggr, opts: opts, res: res}
 	return <-res
 }
 
@@ -329,7 +366,7 @@ func (s *Stream) listen(in <-chan interface{}) {
 			msg.res <- err
 			close(msg.res)
 		case *msgAddAggregator:
-			err := s.addAggregator(msg.aggr)
+			err := s.addAggregator(msg.aggr, msg.opts...)
 			msg.res <- err
 			close(msg.res)
 		}
